@@ -1,0 +1,55 @@
+name: Sync upstream
+
+# Keeps this fork's main in step with Mcp-Brasil/mcp-brasil (every morning, or by hand), then
+# lets the Proxmox pipeline deploy it (deploy-proxmox.yml). The merge keeps this fork's own
+# files (the two workflows and docs/deploy/proxmox.md); a conflict stops here, with the
+# upstream change left for a manual merge.
+#
+# Token: with the SYNC_TOKEN secret (a token with Contents and Workflows write on this fork)
+# the merge is a normal push: CI runs on it and a green CI deploys. Without it the job uses
+# GITHUB_TOKEN, whose pushes trigger nothing and which may not touch workflow files: it then
+# starts the deploy itself, and an upstream change to .github/workflows fails until
+# SYNC_TOKEN exists.
+on:
+  schedule:
+    - cron: "17 9 * * *"  # 06:17 in Brasília
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  actions: write
+
+concurrency:
+  group: sync-upstream
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    # Only in this fork: the upstream repository and other forks skip it.
+    if: github.repository == 'miserani/mcp-brasil'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      HAS_SYNC_TOKEN: ${{ secrets.SYNC_TOKEN != '' }}
+    steps:
+      - name: Merge upstream main into the fork
+        id: sync
+        env:
+          GH_TOKEN: ${{ secrets.SYNC_TOKEN || github.token }}
+          REPO: ${{ github.repository }}
+        run: |
+          before=$(gh api "repos/$REPO/commits/main" --jq .sha)
+          if ! gh api -X POST "repos/$REPO/merge-upstream" -f branch=main > result.json 2> error.txt; then
+            cat result.json error.txt
+            echo "::error::merge-upstream failed (a conflict, or an upstream workflow change without SYNC_TOKEN)"
+            exit 1
+          fi
+          cat result.json
+          after=$(gh api "repos/$REPO/commits/main" --jq .sha)
+          echo "changed=$([ "$before" != "$after" ] && echo true || echo false)" >> "$GITHUB_OUTPUT"
+          echo "main: $before -> $after"
+      - name: Deploy the new main (GITHUB_TOKEN pushes start no workflow)
+        if: steps.sync.outputs.changed == 'true' && env.HAS_SYNC_TOKEN == 'false'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh workflow run deploy-proxmox.yml --repo "${{ github.repository }}" --ref main

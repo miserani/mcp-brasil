@@ -1,0 +1,39 @@
+name: Deploy (Proxmox)
+
+# Deploys this fork's main to the ingest-hub VM on Proxmox, where the CNPJ graph calls it for
+# its "Ao vivo" sections: after every green CI of a push to main (including the morning
+# upstream sync, sync-upstream.yml), or by hand. The job runs on the VM itself (self-hosted
+# runner, label mcp-brasil-proxmox, registered by `cloud/proxmox/vm.sh mcp-brasil` of
+# github.com/miserani/ingest-hub), so the home network opens no inbound port. The VM's
+# /usr/local/sbin/mcp-brasil-deploy checks out the commit, builds mcp-brasil:latest, restarts
+# the mcp-brasil Deployment and checks /health. Never on a pull request: code from a fork
+# must not run on the VM.
+on:
+  workflow_run:
+    workflows: [CI]
+    types: [completed]
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: deploy-proxmox
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  deploy:
+    if: >-
+      github.repository == 'miserani/mcp-brasil' && (
+        github.event_name == 'workflow_dispatch' ||
+        (github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.event == 'push'))
+    runs-on: [self-hosted, mcp-brasil-proxmox]
+    timeout-minutes: 30
+    steps:
+      - name: Deploy ${{ github.event.workflow_run.head_sha || github.sha }}
+        env:
+          SHA: ${{ github.event.workflow_run.head_sha || github.sha }}
+          # Read access to this repository, valid for this job only, through stdin.
+          TOKEN: ${{ github.token }}
+        run: printf '%s\n' "$TOKEN" | sudo /usr/local/sbin/mcp-brasil-deploy "$SHA"
